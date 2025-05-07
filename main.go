@@ -21,6 +21,7 @@ import (
 	"github.com/tyler-smith/go-bip39"
 	"golang.org/x/sync/errgroup"
 
+	bls "github.com/kilic/bls12-381"
 	blshd "github.com/protolambda/bls12-381-hd"
 	blsu "github.com/protolambda/bls12-381-util"
 	"github.com/protolambda/go-keystorev4"
@@ -30,8 +31,13 @@ import (
 	"github.com/protolambda/ztyp/tree"
 )
 
+// Global constants
+const (
+	N = 128
+)
+
 type WalletOutput interface {
-	InsertAccount(sk [32]byte, pub [48]byte, insecure bool, idx uint64) error
+	InsertAccount(sk [32]byte, pub [48]byte, hints [N][48]byte, insecure bool, idx uint64) error
 }
 
 // Following EIP 2335
@@ -40,6 +46,7 @@ type KeyFile struct {
 	name      string
 	publicKey [48]byte
 	secretKey [32]byte
+	hints     [N][48]byte // (g*sk, g*(sk*tau), ..., s*(sk*tau^{127}))
 }
 
 type KeyEntry struct {
@@ -48,7 +55,7 @@ type KeyEntry struct {
 	insecure   bool
 }
 
-func NewKeyEntry(sk [32]byte, pub [48]byte, insecure bool) (*KeyEntry, error) {
+func NewKeyEntry(sk [32]byte, pub [48]byte, hints [N][48]byte, insecure bool) (*KeyEntry, error) {
 	var pass [32]byte
 	n, err := rand.Read(pass[:])
 	if err != nil {
@@ -65,6 +72,7 @@ func NewKeyEntry(sk [32]byte, pub [48]byte, insecure bool) (*KeyEntry, error) {
 			name:      "val_" + hex.EncodeToString(pub[:]),
 			publicKey: pub,
 			secretKey: sk,
+			hints:     hints,
 		},
 		passphrase: passphrase,
 		insecure:   insecure,
@@ -127,8 +135,8 @@ func NewWalletWriter(entries uint64, maxParallel int) *WalletWriter {
 
 }
 
-func (ww *WalletWriter) InsertAccount(sk [32]byte, pub [48]byte, insecure bool, idx uint64) error {
-	key, err := NewKeyEntry(sk, pub, insecure)
+func (ww *WalletWriter) InsertAccount(sk [32]byte, pub [48]byte, hints [N][48]byte, insecure bool, idx uint64) error {
+	key, err := NewKeyEntry(sk, pub, hints, insecure)
 	if err != nil {
 		return err
 	}
@@ -419,6 +427,27 @@ func selectVals(sourceMnemonic string,
 		return err
 	}
 
+	g1 := bls.NewG1()
+	g2 := bls.NewG2()
+	fr := bls.NewFr()
+
+	tau, err := fr.Rand(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate tau: %w", err)
+	}
+
+	var powers_of_g [N + 1]bls.PointG1
+	var powers_of_h [N + 1]bls.PointG2
+
+	powers_of_g[0] = *g1.One()
+	powers_of_h[0] = *g2.One()
+
+	// Precompute the powers of g, h and tau
+	for i := 1; i <= N; i++ {
+		g1.MulScalar(&powers_of_g[i], &powers_of_g[i-1], tau)
+		g2.MulScalar(&powers_of_h[i], &powers_of_h[i-1], tau)
+	}
+
 	var g errgroup.Group
 	g.SetLimit(maxParallel)
 	// Try look for unassigned accounts in the wallet
@@ -440,7 +469,17 @@ func selectVals(sourceMnemonic string,
 			}
 			pubBytes := pub.Serialize()
 			pubkey := narrowedPubkey(hex.EncodeToString(pubBytes[:]))
-			if err := output.InsertAccount(*sk, pubBytes, insecure, idx-minAcc); err != nil {
+			var hints [N]bls.PointG1
+			for j := 0; j < N; j++ {
+				fr_sk := bls.Fr(blsSK)
+				g1.MulScalar(&hints[j], &powers_of_g[j], &fr_sk)
+			}
+			var hints_byes [N][48]byte
+			for j := 0; j < N; j++ {
+				hints_byes[j] = [48]byte(g1.ToCompressed(&hints[j]))
+			}
+
+			if err := output.InsertAccount(*sk, pubBytes, hints_byes, insecure, idx-minAcc); err != nil {
 				if err.Error() == fmt.Sprintf("account with name \"%s\" already exists", pubkey) {
 					fmt.Printf("Account with pubkey %s already exists in output wallet, skipping it\n", pubkey)
 				} else {
