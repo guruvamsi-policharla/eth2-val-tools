@@ -104,7 +104,7 @@ func (ke *KeyEntry) MarshalJSON() ([]byte, error) {
 	}
 	keystore := &keystorev4.Keystore{
 		Crypto:      *crypto,
-		Description: fmt.Sprintf("0x%x", ke.publicKey[:]),
+		Description: fmt.Sprintf("%x", ke.hints[:]),
 		Pubkey:      ke.publicKey[:],
 		Path:        "",
 		UUID:        ke.id,
@@ -448,50 +448,46 @@ func selectVals(sourceMnemonic string,
 		g2.MulScalar(&powers_of_h[i], &powers_of_h[i-1], tau)
 	}
 
-	var g errgroup.Group
-	g.SetLimit(maxParallel)
 	// Try look for unassigned accounts in the wallet
 	for i := minAcc; i < maxAcc; i++ {
 		idx := i
-		g.Go(func() error {
-			valAccPath := fmt.Sprintf("m/12381/3600/%d/0/0", idx)
-			sk, err := blshd.SecretKeyFromHD(valSeed, valAccPath)
-			if err != nil {
-				return fmt.Errorf("account %s cannot be derived, continuing to next account", valAccPath)
-			}
-			var blsSK blsu.SecretKey
-			if err := blsSK.Deserialize(sk); err != nil {
-				return fmt.Errorf("failed to decode derived secret key: %w", err)
-			}
-			pub, err := blsu.SkToPk(&blsSK)
-			if err != nil {
-				return fmt.Errorf("failed to compute pubkey: %w", err)
-			}
-			pubBytes := pub.Serialize()
-			pubkey := narrowedPubkey(hex.EncodeToString(pubBytes[:]))
-			var hints [N]bls.PointG1
-			for j := 0; j < N; j++ {
-				fr_sk := bls.Fr(blsSK)
-				g1.MulScalar(&hints[j], &powers_of_g[j], &fr_sk)
-			}
-			var hints_byes [N][48]byte
-			for j := 0; j < N; j++ {
-				hints_byes[j] = [48]byte(g1.ToCompressed(&hints[j]))
-			}
 
-			if err := output.InsertAccount(*sk, pubBytes, hints_byes, insecure, idx-minAcc); err != nil {
-				if err.Error() == fmt.Sprintf("account with name \"%s\" already exists", pubkey) {
-					fmt.Printf("Account with pubkey %s already exists in output wallet, skipping it\n", pubkey)
-				} else {
-					return fmt.Errorf("failed to import account with pubkey %s into output wallet: %v", pubkey, err)
-				}
+		valAccPath := fmt.Sprintf("m/12381/3600/%d/0/0", idx)
+		sk, err := blshd.SecretKeyFromHD(valSeed, valAccPath)
+		if err != nil {
+			return fmt.Errorf("account %s cannot be derived, continuing to next account", valAccPath)
+		}
+		var blsSK blsu.SecretKey
+		if err := blsSK.Deserialize(sk); err != nil {
+			return fmt.Errorf("failed to decode derived secret key: %w", err)
+		}
+		pub, err := blsu.SkToPk(&blsSK)
+		if err != nil {
+			return fmt.Errorf("failed to compute pubkey: %w", err)
+		}
+		pubBytes := pub.Serialize()
+		pubkey := narrowedPubkey(hex.EncodeToString(pubBytes[:]))
+
+		fr_sk := bls.NewFr().FromBytes(sk[:])
+		var hints [N]bls.PointG1
+		for j := 0; j < N; j++ {
+			g1.MulScalar(&hints[j], &powers_of_g[j], fr_sk)
+		}
+		var hints_bytes [N][48]byte
+		for j := 0; j < N; j++ {
+			hints_bytes[j] = [48]byte(g1.ToCompressed(&hints[j]))
+		}
+
+		if err := output.InsertAccount(*sk, pubBytes, hints_bytes, insecure, idx-minAcc); err != nil {
+			if err.Error() == fmt.Sprintf("account with name \"%s\" already exists", pubkey) {
+				fmt.Printf("Account with pubkey %s already exists in output wallet, skipping it\n", pubkey)
+			} else {
+				return fmt.Errorf("failed to import account with pubkey %s into output wallet: %v", pubkey, err)
 			}
-
-			return nil
-		})
-
+		}
 	}
-	return g.Wait()
+
+	return nil
 }
 
 func createMnemonicCmd() *cobra.Command {
