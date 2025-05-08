@@ -37,7 +37,7 @@ const (
 )
 
 type WalletOutput interface {
-	InsertAccount(sk [32]byte, pub [48]byte, hints [N][48]byte, insecure bool, idx uint64) error
+	InsertAccount(sk [32]byte, pub [48]byte, hints [N + 1][48]byte, insecure bool, idx uint64) error
 }
 
 // Following EIP 2335
@@ -46,7 +46,7 @@ type KeyFile struct {
 	name      string
 	publicKey [48]byte
 	secretKey [32]byte
-	hints     [N][48]byte // (g*sk, g*(sk*tau), ..., s*(sk*tau^{127}))
+	hints     [N + 1][48]byte // (g*sk, g*(sk*tau), ..., s*(sk*tau^{127}), s*(sk*tau^{128}))
 }
 
 type KeyEntry struct {
@@ -55,7 +55,7 @@ type KeyEntry struct {
 	insecure   bool
 }
 
-func NewKeyEntry(sk [32]byte, pub [48]byte, hints [N][48]byte, insecure bool) (*KeyEntry, error) {
+func NewKeyEntry(sk [32]byte, pub [48]byte, hints [N + 1][48]byte, insecure bool) (*KeyEntry, error) {
 	var pass [32]byte
 	n, err := rand.Read(pass[:])
 	if err != nil {
@@ -135,7 +135,7 @@ func NewWalletWriter(entries uint64, maxParallel int) *WalletWriter {
 
 }
 
-func (ww *WalletWriter) InsertAccount(sk [32]byte, pub [48]byte, hints [N][48]byte, insecure bool, idx uint64) error {
+func (ww *WalletWriter) InsertAccount(sk [32]byte, pub [48]byte, hints [N + 1][48]byte, insecure bool, idx uint64) error {
 	key, err := NewKeyEntry(sk, pub, hints, insecure)
 	if err != nil {
 		return err
@@ -431,10 +431,10 @@ func selectVals(sourceMnemonic string,
 	g2 := bls.NewG2()
 	fr := bls.NewFr()
 
-	tau, err := fr.Rand(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("failed to generate tau: %w", err)
-	}
+	// tau is set to 2. NOTE: INSECURE.
+	// should be done via a distributed setup
+	tau := fr.One()
+	tau.Add(tau, fr.One())
 
 	var powers_of_g [N + 1]bls.PointG1
 	var powers_of_h [N + 1]bls.PointG2
@@ -447,6 +447,31 @@ func selectVals(sourceMnemonic string,
 		g1.MulScalar(&powers_of_g[i], &powers_of_g[i-1], tau)
 		g2.MulScalar(&powers_of_h[i], &powers_of_h[i-1], tau)
 	}
+
+	var powers_of_g_hex [N + 1]string
+	var powers_of_h_hex [N + 1]string
+
+	for i := 0; i < N+1; i++ {
+		powers_of_g_i_bytes := [48]byte(g1.ToCompressed(&powers_of_g[i]))
+		powers_of_h_i_bytes := [96]byte(g2.ToCompressed(&powers_of_h[i]))
+
+		powers_of_g_hex[i] = hex.EncodeToString(powers_of_g_i_bytes[:])
+		powers_of_h_hex[i] = hex.EncodeToString(powers_of_h_i_bytes[:])
+	}
+
+	crsFilePath := "crs.json"
+	crsData := map[string]interface{}{
+		"powers_of_g": powers_of_g_hex[:],
+		"powers_of_h": powers_of_h_hex[:],
+	}
+	crsJSON, err := json.MarshalIndent(crsData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal CRS data to JSON: %w", err)
+	}
+	if err := ioutil.WriteFile(crsFilePath, crsJSON, 0644); err != nil {
+		return fmt.Errorf("failed to write CRS data to file: %w", err)
+	}
+	fmt.Printf("CRS data saved to %s\n", crsFilePath)
 
 	// Try look for unassigned accounts in the wallet
 	for i := minAcc; i < maxAcc; i++ {
@@ -469,12 +494,12 @@ func selectVals(sourceMnemonic string,
 		pubkey := narrowedPubkey(hex.EncodeToString(pubBytes[:]))
 
 		fr_sk := bls.NewFr().FromBytes(sk[:])
-		var hints [N]bls.PointG1
-		for j := 0; j < N; j++ {
+		var hints [N + 1]bls.PointG1
+		for j := 0; j < N+1; j++ {
 			g1.MulScalar(&hints[j], &powers_of_g[j], fr_sk)
 		}
-		var hints_bytes [N][48]byte
-		for j := 0; j < N; j++ {
+		var hints_bytes [N + 1][48]byte
+		for j := 0; j < N+1; j++ {
 			hints_bytes[j] = [48]byte(g1.ToCompressed(&hints[j]))
 		}
 
